@@ -1,0 +1,253 @@
+// Conexão e esquema do banco de dados local (SQLite via node:sqlite).
+// O arquivo fica fora do projeto para não interferir no watch do Next.js.
+// Defina BARBEARIA_DB_PATH para usar outro caminho.
+import { DatabaseSync } from "node:sqlite";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { hashPasswordSync } from "@/lib/password";
+
+const DB_PATH =
+  process.env.BARBEARIA_DB_PATH ||
+  path.join(os.homedir(), ".barbearia-premium", "barbearia.db");
+
+const GLOBAL_KEY = "__barbearia_db__" as const;
+
+type GlobalWithDb = typeof globalThis & {
+  [GLOBAL_KEY]?: DatabaseSync;
+};
+
+function open(): DatabaseSync {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  const db = new DatabaseSync(DB_PATH);
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA busy_timeout = 5000;");
+  migrate(db);
+  seed(db);
+  return db;
+}
+
+export function getDb(): DatabaseSync {
+  const g = globalThis as GlobalWithDb;
+  if (!g[GLOBAL_KEY]) g[GLOBAL_KEY] = open();
+  return g[GLOBAL_KEY]!;
+}
+
+export { DB_PATH };
+
+function migrate(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'admin',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_hash TEXT NOT NULL UNIQUE,
+      profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS services (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      price REAL NOT NULL DEFAULT 0,
+      duration_minutes INTEGER NOT NULL DEFAULT 30,
+      image_url TEXT NOT NULL DEFAULT '',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS clients (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);
+
+    CREATE TABLE IF NOT EXISTS appointments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+      service_id INTEGER REFERENCES services(id) ON DELETE SET NULL,
+      client_name_snapshot TEXT NOT NULL,
+      client_phone_snapshot TEXT NOT NULL,
+      service_name_snapshot TEXT NOT NULL,
+      service_price_snapshot REAL NOT NULL,
+      service_duration_snapshot INTEGER NOT NULL,
+      appointment_date TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      notes TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'site',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_appt_date ON appointments(appointment_date);
+    CREATE INDEX IF NOT EXISTS idx_appt_status ON appointments(status);
+
+    CREATE TABLE IF NOT EXISTS business_hours (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      weekday INTEGER NOT NULL UNIQUE,
+      is_open INTEGER NOT NULL DEFAULT 1,
+      opening_time TEXT NOT NULL DEFAULT '09:00',
+      closing_time TEXT NOT NULL DEFAULT '19:00'
+    );
+
+    CREATE TABLE IF NOT EXISTS business_breaks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      weekday INTEGER NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS blocked_slots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      start_datetime TEXT NOT NULL,
+      end_datetime TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS gallery (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      image_url TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT 'corte',
+      description TEXT NOT NULL DEFAULT '',
+      is_featured INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS testimonials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_name TEXT NOT NULL,
+      content TEXT NOT NULL,
+      rating INTEGER NOT NULL DEFAULT 5,
+      image_url TEXT NOT NULL DEFAULT '',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+}
+
+function seed(db: DatabaseSync) {
+  const hasService = db.prepare("SELECT COUNT(*) AS c FROM services").get() as {
+    c: number;
+  };
+  if (hasService.c === 0) {
+    const insert = db.prepare(
+      `INSERT INTO services (name, description, price, duration_minutes, image_url, is_active, sort_order)
+       VALUES (?, ?, ?, ?, '', 1, ?)`
+    );
+    const services: Array<[string, string, number, number]> = [
+      ["Corte tradicional", "Corte clássico com acabamento preciso e acabamento na navalha.", 45, 40],
+      ["Degradê / Fade", "Fade limpo nas laterais com transição suave e definição na nuca.", 50, 45],
+      ["Corte + barba", "Experiência completa: corte personalizado, barba modelada e toalha quente.", 70, 60],
+      ["Barba", "Barba desenhada, toalha quente, óleo e hidratação.", 35, 30],
+      ["Acabamento", "Manutenção de contornos, nuca e laterais.", 25, 20],
+      ["Sobrancelha", "Design de sobrancelha com acabamento natural.", 20, 15],
+      ["Corte infantil", "Corte confortável e divertido para as crianças.", 40, 35],
+    ];
+    services.forEach((s, i) => insert.run(s[0], s[1], s[2], s[3], i));
+  }
+
+  const hasHours = db.prepare("SELECT COUNT(*) AS c FROM business_hours").get() as {
+    c: number;
+  };
+  if (hasHours.c === 0) {
+    const insert = db.prepare(
+      "INSERT INTO business_hours (weekday, is_open, opening_time, closing_time) VALUES (?, ?, ?, ?)"
+    );
+    // 0 = domingo ... 6 = sábado
+    const week: Array<[number, number, string, string]> = [
+      [0, 0, "09:00", "19:00"], // domingo fechado
+      [1, 1, "09:00", "19:00"],
+      [2, 1, "09:00", "19:00"],
+      [3, 1, "09:00", "19:00"],
+      [4, 1, "09:00", "19:00"],
+      [5, 1, "09:00", "19:00"],
+      [6, 1, "09:00", "17:00"], // sábado
+    ];
+    week.forEach((w) => insert.run(w[0], w[1], w[2], w[3]));
+  }
+
+  const hasBreaks = db.prepare("SELECT COUNT(*) AS c FROM business_breaks").get() as {
+    c: number;
+  };
+  if (hasBreaks.c === 0) {
+    const insert = db.prepare(
+      "INSERT INTO business_breaks (weekday, start_time, end_time, description) VALUES (?, ?, ?, ?)"
+    );
+    for (let d = 1; d <= 5; d++) insert.run(d, "12:00", "13:30", "Almoço");
+  }
+
+  const hasProfile = db.prepare("SELECT COUNT(*) AS c FROM profiles").get() as {
+    c: number;
+  };
+  if (hasProfile.c === 0) {
+    const email = process.env.BARBEARIA_ADMIN_EMAIL || "admin@casanavalha.com.br";
+    const password = process.env.BARBEARIA_ADMIN_PASSWORD || "barbearia2026";
+    db.prepare(
+      "INSERT INTO profiles (name, email, password_hash, role) VALUES (?, ?, ?, 'admin')"
+    ).run("Administrador", email, hashPasswordSync(password));
+  }
+
+  const hasGallery = db.prepare("SELECT COUNT(*) AS c FROM gallery").get() as {
+    c: number;
+  };
+  void hasGallery; // Galeria propositalmente vazia: as fotos reais são adicionadas pelo painel.
+
+  const defaults: Record<string, string> = {
+    business_name: "Casa Navalha",
+    tagline: "Barbearia Premium",
+    barber_name: "Alex Ferreira",
+    barber_role: "Barbeiro e fundador",
+    barber_bio:
+      "Mais do que técnica, o trabalho envolve atenção aos detalhes, dedicação e entendimento do estilo de cada cliente. Cada corte é pensado para valorizar a personalidade, respeitando as preferências e buscando um resultado que faça diferença.",
+    barber_years: "8",
+    barber_specialties: "Degradê, cortes clássicos, barba modelada",
+    hero_kicker: "ESTILO. PRECISÃO. PERSONALIDADE.",
+    hero_title: "Seu estilo começa no detalhe.",
+    hero_description:
+      "Mais do que um corte, uma experiência feita para valorizar seu estilo e sua personalidade.",
+    phone: "(11) 99999-9999",
+    whatsapp: "5511999999999",
+    instagram: "https://instagram.com/",
+    address: "Rua das Palmeiras, 123 — São Paulo/SP",
+    map_url:
+      "https://www.google.com/maps?q=Rua+das+Palmeiras+123+Sao+Paulo&output=embed",
+    schedule_display: "Seg a Sex 09:00–19:00 · Sáb 09:00–17:00 · Dom fechado",
+    slot_interval_minutes: "15",
+    buffer_minutes: "5",
+    min_notice_minutes: "60",
+    max_days_ahead: "60",
+    hero_image: "",
+    about_image: "",
+    environment_cover: "",
+  };
+  const insertSetting = db.prepare(
+    "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)"
+  );
+  Object.entries(defaults).forEach(([k, v]) => insertSetting.run(k, v));
+}
