@@ -10,12 +10,19 @@ import {
   deleteBreak,
   updateBusinessHour,
 } from "@/lib/queries";
+import { runMutation } from "@/lib/storage";
 
 const WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
 
 export async function saveWorkingHours(formData: FormData) {
   await requireAdmin();
 
+  const changes: Array<{
+    weekday: number;
+    hour: { is_open: boolean; opening_time: string; closing_time: string };
+  }> = [];
+
+  // Valida tudo antes de gravar qualquer alteração.
   for (const weekday of WEEKDAYS) {
     const open = formData.get(`open_${weekday}`) === "on";
     const opening = String(formData.get(`opening_${weekday}`) ?? "09:00");
@@ -26,12 +33,15 @@ export async function saveWorkingHours(formData: FormData) {
         "O horário de fechamento deve ser depois da abertura."
       );
     }
-    updateBusinessHour(weekday, {
-      is_open: open,
-      opening_time: opening,
-      closing_time: closing,
+    changes.push({
+      weekday,
+      hour: { is_open: open, opening_time: opening, closing_time: closing },
     });
   }
+
+  await runMutation(() => {
+    for (const { weekday, hour } of changes) updateBusinessHour(weekday, hour);
+  });
 
   revalidatePath("/admin/horarios");
   revalidatePath("/");
@@ -48,7 +58,7 @@ export async function addBreakAction(formData: FormData) {
     actionError("/admin/horarios", "Intervalo de pausa inválido.");
   }
   if (!WEEKDAYS.includes(weekday)) actionError("/admin/horarios", "Dia inválido.");
-  addBreak({ weekday, start_time: start, end_time: end, description });
+  await runMutation(() => addBreak({ weekday, start_time: start, end_time: end, description }));
   revalidatePath("/admin/horarios");
   revalidatePath("/");
   actionOk("/admin/horarios", "Pausa adicionada.");
@@ -56,7 +66,8 @@ export async function addBreakAction(formData: FormData) {
 
 export async function removeBreak(formData: FormData) {
   await requireAdmin();
-  deleteBreak(Number(formData.get("id")));
+  const id = Number(formData.get("id"));
+  await runMutation(() => deleteBreak(id));
   revalidatePath("/admin/horarios");
   revalidatePath("/");
   actionOk("/admin/horarios", "Pausa removida.");
@@ -78,7 +89,7 @@ export async function addBlockAction(formData: FormData) {
     actionError("/admin/horarios", "O fim do bloqueio deve ser depois do início.");
   }
 
-  addBlock({ start_datetime, end_datetime, reason });
+  await runMutation(() => addBlock({ start_datetime, end_datetime, reason }));
   revalidatePath("/admin/horarios");
   revalidatePath("/");
   actionOk("/admin/horarios", "Horário bloqueado.");
@@ -86,7 +97,8 @@ export async function addBlockAction(formData: FormData) {
 
 export async function removeBlock(formData: FormData) {
   await requireAdmin();
-  deleteBlock(Number(formData.get("id")));
+  const id = Number(formData.get("id"));
+  await runMutation(() => deleteBlock(id));
   revalidatePath("/admin/horarios");
   revalidatePath("/");
   actionOk("/admin/horarios", "Bloqueio removido.");

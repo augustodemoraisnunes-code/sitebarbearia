@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/admin-guard";
 import { actionError, actionOk } from "@/lib/feedback";
 import { deleteClient, updateClient } from "@/lib/queries";
+import { runMutation } from "@/lib/storage";
 
 export async function saveClient(formData: FormData) {
   await requireAdmin();
@@ -17,14 +18,15 @@ export async function saveClient(formData: FormData) {
     actionError("/admin/clientes", "Informe um telefone válido com DDD.");
   }
 
-  updateClient(id, { name, phone, notes });
+  await runMutation(() => updateClient(id, { name, phone, notes }));
   revalidatePath("/admin/clientes");
   actionOk("/admin/clientes", "Cliente atualizado.");
 }
 
 export async function removeClient(formData: FormData) {
   await requireAdmin();
-  deleteClient(Number(formData.get("id")));
+  const id = Number(formData.get("id"));
+  await runMutation(() => deleteClient(id));
   revalidatePath("/admin/clientes");
   actionOk("/admin/clientes", "Cliente excluído.");
 }

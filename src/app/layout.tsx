@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Bebas_Neue, Montserrat, Playfair_Display } from "next/font/google";
 import "./globals.css";
 import { getSettings } from "@/lib/queries";
+import { ensureStorage } from "@/lib/storage";
 
 const bebas = Bebas_Neue({
   subsets: ["latin"],
@@ -30,7 +31,10 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export function generateMetadata(): Metadata {
+export async function generateMetadata(): Promise<Metadata> {
+  // Inicializa o storage antes de ler o banco: em produção os dados vêm do
+  // Netlify Blobs e o diretório local nunca é usado.
+  await ensureStorage();
   const s = getSettings();
   const name = s.business_name || "Casa Navalha";
   return {
@@ -61,9 +65,10 @@ export function generateMetadata(): Metadata {
   };
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  await ensureStorage();
   const s = getSettings();
   const name = s.business_name || "Casa Navalha";
   const phone = s.phone || "";

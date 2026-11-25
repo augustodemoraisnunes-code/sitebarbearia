@@ -3,6 +3,8 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getCurrentAdmin } from "@/lib/auth";
+import { isCloudPersistence } from "@/lib/db";
+import { getUploadsStore } from "@/lib/storage/blobs";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +18,14 @@ const ALLOWED: Record<string, string> = {
 
 const MAX_SIZE = 8 * 1024 * 1024; // 8 MB
 
-/** POST /api/admin/upload — recebe um arquivo de imagem e devolve a URL. */
+/**
+ * POST /api/admin/upload — recebe um arquivo de imagem e devolve a URL.
+ *
+ * Em produção (Netlify) a imagem vai para o Netlify Blobs — o sistema de
+ * arquivos da função é efêmero e não serve como armazenamento. A URL
+ * devolvida (/api/uploads/arquivo) é servida por esta mesma aplicação.
+ * Em desenvolvimento local o arquivo é gravado em public/uploads, como antes.
+ */
 export async function POST(request: Request) {
   const admin = await getCurrentAdmin();
   if (!admin) {
@@ -44,12 +53,25 @@ export async function POST(request: Request) {
     }
 
     const filename = `${Date.now()}-${randomBytes(6).toString("hex")}.${ext}`;
+    const buffer = await file.arrayBuffer();
+
+    if (isCloudPersistence()) {
+      const store = await getUploadsStore();
+      if (!store) {
+        return NextResponse.json(
+          { error: "Armazenamento de imagens indisponível no momento." },
+          { status: 503 }
+        );
+      }
+      await store.set(filename, buffer, {
+        metadata: { content_type: file.type },
+      });
+      return NextResponse.json({ url: `/api/uploads/${filename}` }, { status: 201 });
+    }
+
     const dir = path.join(process.cwd(), "public", "uploads");
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(
-      path.join(dir, filename),
-      Buffer.from(await file.arrayBuffer())
-    );
+    await fs.writeFile(path.join(dir, filename), Buffer.from(buffer));
 
     return NextResponse.json({ url: `/uploads/${filename}` }, { status: 201 });
   } catch (err) {

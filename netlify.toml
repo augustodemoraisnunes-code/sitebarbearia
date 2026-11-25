@@ -1,0 +1,16 @@
+# Configuração de deploy no Netlify.
+#
+# O Netlify detecta o Next.js automaticamente e instala o adaptador oficial
+# (OpenNext) sem nenhuma configuração extra — por isso NÃO fixamos a versão
+# de @netlify/plugin-nextjs aqui: o runtime é atualizado a cada build.
+#
+# Os dados do site não usam o disco da função (efêmero no Netlify): o banco
+# roda em memória e é persistido no Netlify Blobs (ver src/lib/storage).
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # node:sqlite exige Node.js 22.13+ (disponível sem flags desde essa versão)
+  NODE_VERSION = "22"

@@ -1,15 +1,24 @@
-// Conexão e esquema do banco de dados local (SQLite via node:sqlite).
-// O arquivo fica fora do projeto para não interferir no watch do Next.js.
-// Defina BARBEARIA_DB_PATH para usar outro caminho.
+// Conexão e esquema do banco de dados (SQLite via node:sqlite).
+//
+// Modos de operação, resolvidos em tempo de execução:
+//
+//   1. BARBEARIA_DB_PATH definido -> arquivo nesse caminho exato (dev ou
+//      volume montado explicitamente).
+//   2. Produção no Netlify (NETLIFY=true ou BARBEARIA_STORAGE=blobs)
+//      -> banco EM MEMÓRIA, sem tocar no sistema de arquivos. A persistência
+//      é feita pelo Netlify Blobs via src/lib/storage.
+//   3. Padrão (desenvolvimento local) -> arquivo fora do projeto (para não
+//      interferir no watch do Next.js), com fallback automático para o
+//      diretório temporário e, em último caso, memória.
+//
+// Nenhum modo depende da existência de um diretório específico: falhas de
+// criação do arquivo caem para o próximo candidato em vez de quebrar a
+// renderização.
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { hashPasswordSync } from "@/lib/password";
-
-const DB_PATH =
-  process.env.BARBEARIA_DB_PATH ||
-  path.join(os.homedir(), ".barbearia-premium", "barbearia.db");
 
 const GLOBAL_KEY = "__barbearia_db__" as const;
 
@@ -17,24 +26,89 @@ type GlobalWithDb = typeof globalThis & {
   [GLOBAL_KEY]?: DatabaseSync;
 };
 
+/**
+ * Verdadeiro quando os dados devem ser persistidos no Netlify Blobs
+ * (produção no Netlify). Nesse modo nenhum arquivo é criado em disco.
+ */
+export function isCloudPersistence(): boolean {
+  const mode = process.env.BARBEARIA_STORAGE;
+  if (mode === "file" || mode === "memory") return false;
+  if (mode === "blobs") return true;
+  return process.env.NETLIFY === "true";
+}
+
+/** Candidatos a arquivo de banco, do mais desejável ao fallback final. */
+function fileCandidates(): string[] {
+  const explicit = process.env.BARBEARIA_DB_PATH;
+  if (explicit) return [explicit, ":memory:"];
+
+  const candidates: string[] = [];
+  try {
+    candidates.push(path.join(os.homedir(), ".barbearia-premium", "barbearia.db"));
+  } catch {
+    /* sem diretório pessoal disponível */
+  }
+  try {
+    candidates.push(path.join(os.tmpdir(), "barbearia-premium", "barbearia.db"));
+  } catch {
+    /* sem diretório temporário disponível */
+  }
+  candidates.push(":memory:");
+  return candidates;
+}
+
 function open(): DatabaseSync {
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  const db = new DatabaseSync(DB_PATH);
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA foreign_keys = ON;");
-  db.exec("PRAGMA busy_timeout = 5000;");
-  migrate(db);
-  seed(db);
-  return db;
+  const candidates =
+    isCloudPersistence() && !process.env.BARBEARIA_DB_PATH
+      ? [":memory:"] // produção no Netlify: nunca cria diretórios em disco
+      : fileCandidates();
+
+  let lastError: unknown;
+  for (const target of candidates) {
+    try {
+      if (target !== ":memory:") {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+      }
+      const db = new DatabaseSync(target);
+      db.exec("PRAGMA journal_mode = WAL;");
+      db.exec("PRAGMA foreign_keys = ON;");
+      db.exec("PRAGMA busy_timeout = 5000;");
+      migrate(db);
+      seed(db);
+      return db;
+    } catch (err) {
+      lastError = err;
+      console.warn(
+        `[barbearia] Banco indisponível em "${target}":`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+  throw new Error(
+    `[barbearia] Não foi possível inicializar o banco de dados: ${
+      lastError instanceof Error ? lastError.message : lastError
+    }`
+  );
+}
+
+/** Carrega o snapshot persistido assim que o banco é aberto (melhor esforço). */
+function scheduleCloudBootstrap(): void {
+  if (!isCloudPersistence()) return;
+  void import("@/lib/storage")
+    .then((m) => m.ensureStorage())
+    .catch(() => {
+      /* degrada para o estado em memória */
+    });
 }
 
 export function getDb(): DatabaseSync {
   const g = globalThis as GlobalWithDb;
-  if (!g[GLOBAL_KEY]) g[GLOBAL_KEY] = open();
+  if (!g[GLOBAL_KEY]) {
+    g[GLOBAL_KEY] = open();
+    scheduleCloudBootstrap();
+  }
   return g[GLOBAL_KEY]!;
 }
-
-export { DB_PATH };
 
 function migrate(db: DatabaseSync) {
   db.exec(`

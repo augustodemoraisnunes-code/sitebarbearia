@@ -11,6 +11,7 @@ import {
   monthAvailability,
 } from "@/lib/booking/availability";
 import { getBookingConfig } from "@/lib/booking";
+import { ensureStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,7 @@ export const dynamic = "force-dynamic";
  * GET /api/availability?month=YYYY-MM&service_id=1    -> { days: { "YYYY-MM-DD": true } }
  */
 export async function GET(request: Request) {
+  await ensureStorage();
   const url = new URL(request.url);
   const serviceId = Number(url.searchParams.get("service_id"));
   const date = url.searchParams.get("date");

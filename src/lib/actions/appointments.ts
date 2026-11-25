@@ -17,6 +17,7 @@ import {
 } from "@/lib/queries";
 import type { AppointmentStatus } from "@/lib/types";
 import { getDb } from "@/lib/db";
+import { runMutation } from "@/lib/storage";
 
 function refresh() {
   revalidatePath("/admin");
@@ -34,45 +35,49 @@ export async function createManualAppointment(formData: FormData) {
   const notes = String(formData.get("notes") ?? "");
   const status = String(formData.get("status") ?? "confirmed") as AppointmentStatus;
 
-  const service = getService(serviceId);
-  if (!service) actionError("/admin/agendamentos", "Serviço inválido.");
+  // Validação e escrita dentro da mesma mutação: o estado é sincronizado
+  // antes de validar e persistido logo depois, evitando duplicidades.
+  await runMutation(() => {
+    const service = getService(serviceId);
+    if (!service) actionError("/admin/agendamentos", "Serviço inválido.");
 
-  const [h, m] = start.split(":").map(Number);
-  const endMin = h * 60 + m + service.duration_minutes;
-  const end = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(
-    endMin % 60
-  ).padStart(2, "0")}`;
+    const [h, m] = start.split(":").map(Number);
+    const endMin = h * 60 + m + service.duration_minutes;
+    const end = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(
+      endMin % 60
+    ).padStart(2, "0")}`;
 
-  const params = buildAvailabilityParams(date, service.duration_minutes);
-  const slots = getAvailableSlots(params);
-  if (!slots.includes(start)) {
-    actionError("/admin/agendamentos", "Horário indisponível para este serviço.");
-  }
+    const params = buildAvailabilityParams(date, service.duration_minutes);
+    const slots = getAvailableSlots(params);
+    if (!slots.includes(start)) {
+      actionError("/admin/agendamentos", "Horário indisponível para este serviço.");
+    }
 
-  const db = getDb();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const client = upsertClient(name, phone);
-    insertAppointment({
-      client_id: client.id,
-      service_id: service.id,
-      client_name: name,
-      client_phone: phone,
-      service_name: service.name,
-      service_price: service.price,
-      service_duration: service.duration_minutes,
-      date,
-      start_time: start,
-      end_time: end,
-      status: status === "pending" ? "pending" : "confirmed",
-      notes,
-      source: "painel",
-    });
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
+    const db = getDb();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const client = upsertClient(name, phone);
+      insertAppointment({
+        client_id: client.id,
+        service_id: service.id,
+        client_name: name,
+        client_phone: phone,
+        service_name: service.name,
+        service_price: service.price,
+        service_duration: service.duration_minutes,
+        date,
+        start_time: start,
+        end_time: end,
+        status: status === "pending" ? "pending" : "confirmed",
+        notes,
+        source: "painel",
+      });
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  });
 
   refresh();
   actionOk("/admin/agendamentos", "Agendamento criado com sucesso.");
@@ -90,53 +95,63 @@ export async function changeAppointmentStatus(formData: FormData) {
     "no_show",
   ];
   if (!allowed.includes(status)) actionError("/admin/agendamentos", "Status inválido.");
-  updateAppointmentStatus(id, status);
+  await runMutation(() => updateAppointmentStatus(id, status));
   refresh();
 }
 
 export async function editAppointment(formData: FormData) {
   await requireAdmin();
   const id = Number(formData.get("id"));
-  const current = getAppointment(id);
-  if (!current) actionError("/admin/agendamentos", "Agendamento não encontrado.");
+  const date = String(formData.get("date") ?? "");
+  const start = String(formData.get("start_time") ?? "");
+  const name = String(formData.get("client_name") ?? "").trim();
+  const phone = String(formData.get("client_phone") ?? "").trim();
+  const notes = String(formData.get("notes") ?? "");
+  const serviceId = Number(formData.get("service_id") || 0);
 
-  const date = String(formData.get("date") ?? current.appointment_date);
-  const start = String(formData.get("start_time") ?? current.start_time);
-  const name = String(formData.get("client_name") ?? current.client_name_snapshot).trim();
-  const phone = String(formData.get("client_phone") ?? current.client_phone_snapshot).trim();
-  const notes = String(formData.get("notes") ?? current.notes);
-  const serviceId = Number(formData.get("service_id") || current.service_id || 0);
+  // Validação contra o estado sincronizado e escrita na mesma mutação.
+  await runMutation(() => {
+    const current = getAppointment(id);
+    if (!current) actionError("/admin/agendamentos", "Agendamento não encontrado.");
 
-  const service = getService(serviceId);
-  const duration = service?.duration_minutes ?? current.service_duration_snapshot;
+    const finalDate = date || current.appointment_date;
+    const finalStart = start || current.start_time;
+    const finalName = (name || current.client_name_snapshot).trim();
+    const finalPhone = (phone || current.client_phone_snapshot).trim();
+    const finalNotes = notes || current.notes;
+    const finalServiceId = serviceId || current.service_id || 0;
 
-  const [h, m] = start.split(":").map(Number);
-  const endMin = h * 60 + m + duration;
-  const end = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(
-    endMin % 60
-  ).padStart(2, "0")}`;
+    const service = getService(finalServiceId);
+    const duration = service?.duration_minutes ?? current.service_duration_snapshot;
 
-  // Valida disponibilidade ignorando o próprio agendamento
-  const params = buildAvailabilityParams(date, duration);
-  const others = (params.appointments ?? []).filter((a) => a.id !== id);
-  const slots = getAvailableSlots({
-    ...params,
-    appointments: others,
-  });
-  if (!slots.includes(start)) {
-    actionError("/admin/agendamentos", "Horário indisponível.");
-  }
+    const [h, m] = finalStart.split(":").map(Number);
+    const endMin = h * 60 + m + duration;
+    const end = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(
+      endMin % 60
+    ).padStart(2, "0")}`;
 
-  updateAppointment(id, {
-    client_name: name,
-    client_phone: phone,
-    date,
-    start_time: start,
-    end_time: end,
-    notes,
-    service_name: service?.name ?? current.service_name_snapshot,
-    service_price: service?.price ?? current.service_price_snapshot,
-    service_duration: duration,
+    // Valida disponibilidade ignorando o próprio agendamento
+    const params = buildAvailabilityParams(finalDate, duration);
+    const others = (params.appointments ?? []).filter((a) => a.id !== id);
+    const slots = getAvailableSlots({
+      ...params,
+      appointments: others,
+    });
+    if (!slots.includes(finalStart)) {
+      actionError("/admin/agendamentos", "Horário indisponível.");
+    }
+
+    updateAppointment(id, {
+      client_name: finalName,
+      client_phone: finalPhone,
+      date: finalDate,
+      start_time: finalStart,
+      end_time: end,
+      notes: finalNotes,
+      service_name: service?.name ?? current.service_name_snapshot,
+      service_price: service?.price ?? current.service_price_snapshot,
+      service_duration: duration,
+    });
   });
 
   refresh();
@@ -145,7 +160,8 @@ export async function editAppointment(formData: FormData) {
 
 export async function removeAppointment(formData: FormData) {
   await requireAdmin();
-  deleteAppointment(Number(formData.get("id")));
+  const id = Number(formData.get("id"));
+  await runMutation(() => deleteAppointment(id));
   refresh();
   actionOk("/admin/agendamentos", "Agendamento removido.");
 }

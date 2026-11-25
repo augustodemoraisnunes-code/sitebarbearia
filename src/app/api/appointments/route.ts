@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { BookingError, createBooking } from "@/lib/booking";
+import { runMutation } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
@@ -7,14 +8,18 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const appointment = createBooking({
-      service_id: Number(body.service_id),
-      client_name: String(body.client_name ?? ""),
-      client_phone: String(body.client_phone ?? ""),
-      date: String(body.date ?? ""),
-      start_time: String(body.start_time ?? ""),
-      notes: body.notes ? String(body.notes) : "",
-    });
+    // `runMutation` recarrega o estado mais recente antes de validar e grava
+    // o snapshot depois: a trava evita reservas duplicadas entre instâncias.
+    const appointment = await runMutation(() =>
+      createBooking({
+        service_id: Number(body.service_id),
+        client_name: String(body.client_name ?? ""),
+        client_phone: String(body.client_phone ?? ""),
+        date: String(body.date ?? ""),
+        start_time: String(body.start_time ?? ""),
+        notes: body.notes ? String(body.notes) : "",
+      })
+    );
 
     return NextResponse.json(
       {

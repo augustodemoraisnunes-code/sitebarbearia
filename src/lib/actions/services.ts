@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/admin-guard";
 import { actionError, actionOk } from "@/lib/feedback";
 import { createService, deleteService, updateService } from "@/lib/queries";
+import { runMutation } from "@/lib/storage";
 
 export async function saveService(formData: FormData) {
   await requireAdmin();
@@ -21,8 +22,10 @@ export async function saveService(formData: FormData) {
   if (!(data.price >= 0)) actionError("/admin/servicos", "Preço inválido.");
   if (!(data.duration_minutes > 0)) actionError("/admin/servicos", "Duração inválida.");
 
-  if (id > 0) updateService(id, data);
-  else createService(data);
+  await runMutation(() => {
+    if (id > 0) updateService(id, data);
+    else createService(data);
+  });
 
   revalidatePath("/admin/servicos");
   revalidatePath("/");
@@ -31,7 +34,8 @@ export async function saveService(formData: FormData) {
 
 export async function removeService(formData: FormData) {
   await requireAdmin();
-  deleteService(Number(formData.get("id")));
+  const id = Number(formData.get("id"));
+  await runMutation(() => deleteService(id));
   revalidatePath("/admin/servicos");
   revalidatePath("/");
   actionOk("/admin/servicos", "Serviço excluído.");

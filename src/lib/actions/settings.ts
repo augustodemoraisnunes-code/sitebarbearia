@@ -10,6 +10,7 @@ import {
   updateProfileName,
   updateProfilePassword,
 } from "@/lib/queries";
+import { runMutation } from "@/lib/storage";
 import { verifyPassword } from "@/lib/password";
 
 const PATH = "/admin/configuracoes";
@@ -68,9 +69,11 @@ export async function saveWebsiteSettings(formData: FormData) {
   }
 
   const name = String(formData.get("admin_name") ?? "").trim();
-  if (name && name !== admin.name) updateProfileName(admin.id, name);
 
-  setSettings(data);
+  await runMutation(() => {
+    if (name && name !== admin.name) updateProfileName(admin.id, name);
+    setSettings(data);
+  });
 
   revalidatePath(PATH);
   revalidatePath("/");
@@ -91,7 +94,8 @@ export async function changePassword(formData: FormData) {
     actionError(PATH, "Senha atual incorreta.");
   }
 
-  updateProfilePassword(admin.id, hashPassword(next));
+  const hashed = hashPassword(next);
+  await runMutation(() => updateProfilePassword(admin.id, hashed));
   revalidatePath(PATH);
   actionOk(PATH, "Senha alterada com sucesso.");
 }

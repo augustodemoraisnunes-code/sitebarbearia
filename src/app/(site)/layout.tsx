@@ -2,13 +2,15 @@ import Navbar from "@/components/site/Navbar";
 import Footer from "@/components/site/Footer";
 import WhatsAppButton from "@/components/site/WhatsAppButton";
 import { getSettings, listServices } from "@/lib/queries";
+import { ensureStorage } from "@/lib/storage";
 
 /** O site precisa refletir imediatamente as alterações feitas no painel. */
 export const dynamic = "force-dynamic";
 
-export default function SiteLayout({
+export default async function SiteLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  await ensureStorage();
   const s = getSettings();
   const services = listServices();
 

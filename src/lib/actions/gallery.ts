@@ -11,6 +11,7 @@ import {
   updateGallery,
   updateTestimonial,
 } from "@/lib/queries";
+import { runMutation } from "@/lib/storage";
 
 const GALLERY_PATH = "/admin/galeria";
 
@@ -28,8 +29,15 @@ export async function saveGalleryItem(formData: FormData) {
     actionError(GALLERY_PATH, "Categoria inválida.");
   }
 
-  if (id > 0) updateGallery(id, { image_url, title, category, description, is_featured });
-  else addGallery({ image_url, title, category, description, is_featured });
+  if (id > 0) {
+    await runMutation(() =>
+      updateGallery(id, { image_url, title, category, description, is_featured })
+    );
+  } else {
+    await runMutation(() =>
+      addGallery({ image_url, title, category, description, is_featured })
+    );
+  }
 
   revalidatePath(GALLERY_PATH);
   revalidatePath("/");
@@ -38,7 +46,8 @@ export async function saveGalleryItem(formData: FormData) {
 
 export async function removeGalleryItem(formData: FormData) {
   await requireAdmin();
-  deleteGallery(Number(formData.get("id")));
+  const id = Number(formData.get("id"));
+  await runMutation(() => deleteGallery(id));
   revalidatePath(GALLERY_PATH);
   revalidatePath("/");
   actionOk(GALLERY_PATH, "Imagem removida.");
@@ -56,9 +65,15 @@ export async function saveTestimonial(formData: FormData) {
   if (!client_name) actionError(GALLERY_PATH, "Informe o nome do cliente.");
   if (!content) actionError(GALLERY_PATH, "Escreva o comentário.");
 
-  if (id > 0)
-    updateTestimonial(id, { client_name, content, rating, image_url, is_active });
-  else addTestimonial({ client_name, content, rating, image_url, is_active });
+  if (id > 0) {
+    await runMutation(() =>
+      updateTestimonial(id, { client_name, content, rating, image_url, is_active })
+    );
+  } else {
+    await runMutation(() =>
+      addTestimonial({ client_name, content, rating, image_url, is_active })
+    );
+  }
 
   revalidatePath(GALLERY_PATH);
   revalidatePath("/");
@@ -67,7 +82,8 @@ export async function saveTestimonial(formData: FormData) {
 
 export async function removeTestimonial(formData: FormData) {
   await requireAdmin();
-  deleteTestimonial(Number(formData.get("id")));
+  const id = Number(formData.get("id"));
+  await runMutation(() => deleteTestimonial(id));
   revalidatePath(GALLERY_PATH);
   revalidatePath("/");
   actionOk(GALLERY_PATH, "Depoimento removido.");
