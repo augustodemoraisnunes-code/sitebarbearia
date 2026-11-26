@@ -5,6 +5,7 @@
 // apenas com o estado em memória — nenhuma exceção é propagada para a
 // renderização de páginas ou para a geração de metadados.
 import type { Store } from "@netlify/blobs";
+import { isCloudPersistence } from "@/lib/db";
 
 /** Store dedicada ao snapshot do banco de dados. */
 export const DATABASE_STORE = "barbearia-dados";
@@ -16,10 +17,24 @@ export const UPLOADS_STORE = "barbearia-uploads";
 type BlobsModule = typeof import("@netlify/blobs");
 
 let modulePromise: Promise<BlobsModule | null> | undefined;
+let warned = false;
+
+/** Registra (uma única vez) a causa de a persistência estar degradada. */
+function warnUnavailable(err: unknown): void {
+  if (!isCloudPersistence() || warned) return;
+  warned = true;
+  console.error(
+    "[barbearia] Netlify Blobs indisponível — persistência degradada:",
+    err instanceof Error ? err.message : err
+  );
+}
 
 function loadModule(): Promise<BlobsModule | null> {
   if (!modulePromise) {
-    modulePromise = import("@netlify/blobs").catch(() => null);
+    modulePromise = import("@netlify/blobs").catch((err) => {
+      warnUnavailable(err);
+      return null;
+    });
   }
   return modulePromise;
 }
@@ -30,7 +45,8 @@ export async function getDatabaseStore(): Promise<Store | null> {
   if (!mod) return null;
   try {
     return mod.getStore({ name: DATABASE_STORE, consistency: "strong" });
-  } catch {
+  } catch (err) {
+    warnUnavailable(err);
     return null;
   }
 }
@@ -41,7 +57,8 @@ export async function getUploadsStore(): Promise<Store | null> {
   if (!mod) return null;
   try {
     return mod.getStore({ name: UPLOADS_STORE, consistency: "strong" });
-  } catch {
+  } catch (err) {
+    warnUnavailable(err);
     return null;
   }
 }

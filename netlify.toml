@@ -6,6 +6,8 @@
 #
 # Os dados do site não usam o disco da função (efêmero no Netlify): o banco
 # roda em memória e é persistido no Netlify Blobs (ver src/lib/storage).
+# A ativação é automática pelo contexto do Blobs em runtime — nenhuma
+# variável de ambiente é necessária.
 
 [build]
   command = "npm run build"

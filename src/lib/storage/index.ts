@@ -34,6 +34,19 @@ type StorageState = {
 
 const GLOBAL_KEY = "__barbearia_storage_state__";
 
+let degradeWarned = false;
+
+/** Registra (uma única vez) que a persistência em nuvem não está ativa. */
+function warnDegraded(): void {
+  if (degradeWarned) return;
+  degradeWarned = true;
+  console.error(
+    "[barbearia] Persistência no Netlify Blobs indisponível: os dados " +
+      "(sessões de login, agendamentos e alterações do painel) viverão " +
+      "apenas na memória desta instância e não sobreviverão a reinicializações."
+  );
+}
+
 function state(): StorageState {
   const g = globalThis as Record<string, unknown>;
   const existing = g[GLOBAL_KEY] as StorageState | undefined;
@@ -135,10 +148,14 @@ async function refreshLocked(force: boolean): Promise<void> {
  */
 async function persistLocked(): Promise<boolean> {
   const s = state();
-  if (!s.available) return true; // modo degradado: sem backend para persistir
+  if (!s.available) {
+    warnDegraded();
+    return true; // modo degradado: sem backend para persistir
+  }
   const store = await getDatabaseStore();
   if (!store) {
     s.available = false;
+    warnDegraded();
     return true;
   }
 
