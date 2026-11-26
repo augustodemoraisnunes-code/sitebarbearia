@@ -62,12 +62,7 @@ passam por uma trava otimista com ETag (`src/lib/storage/`), o que mantém a
 validação de conflitos de agendamento correta mesmo com requisições
 simultâneas em instâncias distintas.
 
-**Nenhuma variável de ambiente é necessária**: a ativação é automática — o
-código detecta o contexto do Blobs que a Netlify injeta em runtime
-(`src/lib/db.ts` → `hasBlobsContext()`), sem depender de `NETLIFY=true`
-(variável que só existe no build) nem de configuração no painel.
-
-Variáveis opcionais (apenas para sobrescrever/testar localmente):
+Variáveis relevantes:
 
 | Variável | Efeito |
 | --- | --- |
