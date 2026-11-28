@@ -15,6 +15,12 @@
 //
 // Em desenvolvimento local (banco em arquivo) `runMutation` apenas executa a
 // função: o SQLite local já serializa as escritas.
+//
+// Disponibilidade: toda operação no Blobs tem tempo máximo (`withTimeout`).
+// Se uma leitura falha, o estado remoto fica desconhecido — as gravações são
+// suspensas para não sobrescrever dados remotos com uma cópia local incompleta,
+// e a recuperação acontece automaticamente na tentativa seguinte. Nenhuma
+// falha do Blobs é propagada para a renderização de páginas.
 import { getDb, isCloudPersistence } from "@/lib/db";
 import { applySnapshot, dumpSnapshot, type DatabaseSnapshot } from "@/lib/storage/snapshot";
 import { getDatabaseStore, DATABASE_KEY } from "@/lib/storage/blobs";
@@ -23,6 +29,10 @@ import { getDatabaseStore, DATABASE_KEY } from "@/lib/storage/blobs";
 const SYNC_TTL_MS = 1_000;
 /** Tentativas de gravação com trava antes de recorrer à gravação direta. */
 const MAX_WRITE_ATTEMPTS = 4;
+/** Espera máxima de uma operação no Blobs antes de degradar para memória. */
+const BLOBS_TIMEOUT_MS = 8_000;
+/** Intervalo mínimo entre tentativas de (re)carregar o snapshot. */
+const RELOAD_COOLDOWN_MS = 5_000;
 
 type StorageState = {
   initialized: boolean;
@@ -33,6 +43,23 @@ type StorageState = {
 };
 
 const GLOBAL_KEY = "__barbearia_storage_state__";
+
+let degradeWarned = false;
+
+/**
+ * Registra (uma única vez) que a persistência em nuvem não está ativa.
+ * Só faz sentido quando o modo nuvem foi solicitado — em desenvolvimento
+ * local o banco em arquivo já é persistente e nenhum aviso é emitido.
+ */
+function warnDegraded(): void {
+  if (degradeWarned) return;
+  degradeWarned = true;
+  console.error(
+    "[barbearia] Persistência no Netlify Blobs indisponível: os dados " +
+      "(sessões de login, agendamentos e alterações do painel) viverão " +
+      "apenas na memória desta instância e não sobreviverão a reinicializações."
+  );
+}
 
 function state(): StorageState {
   const g = globalThis as Record<string, unknown>;
@@ -60,54 +87,98 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/**
+ * Limita o tempo de uma operação no Blobs.
+ *
+ * Garante que nenhuma chamada de rede possa prender `ensureStorage()` (SSR,
+ * generateMetadata) ou `runMutation` (login, agendamentos) para sempre. Os
+ * handlers ficam anexados ao `op` mesmo quando o tempo vence a corrida, então
+ * nenhuma rejeição fica sem tratamento.
+ */
+function withTimeout<T>(op: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`operação no Netlify Blobs excedeu ${BLOBS_TIMEOUT_MS}ms`)),
+      BLOBS_TIMEOUT_MS
+    );
+    op.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 /** Carrega (uma vez) e, em seguida, revalida o snapshot com o Blobs. */
 async function refreshLocked(force: boolean): Promise<void> {
   const s = state();
   const db = getDb();
 
-  if (!s.initialized) {
+  // Estado ainda não carregado (primeira vez) ou recuperação após falha:
+  // (re)tentar ler o snapshot respeitando um intervalo mínimo, para não somar
+  // atraso em toda requisição. Mutações (`force`) pulam o intervalo, porque
+  // ali é a última chance de persistir a alteração com estado atualizado.
+  if (!s.initialized || !s.available) {
+    if (!force && Date.now() - s.lastSync < RELOAD_COOLDOWN_MS) return;
+
     const store = await getDatabaseStore();
     if (!store) {
       // Sem Blobs neste ambiente: segue apenas com o banco em memória.
       s.available = false;
       s.initialized = true;
+      s.lastSync = Date.now();
+      warnDegraded();
       return;
     }
-    s.available = true;
     try {
-      const entry = await store.getWithMetadata(DATABASE_KEY, {
-        type: "json",
-        consistency: "strong",
-      });
+      const entry = await withTimeout(
+        store.getWithMetadata(DATABASE_KEY, {
+          type: "json",
+          consistency: "strong",
+        })
+      );
       if (entry && entry.data) {
         applySnapshot(db, entry.data as DatabaseSnapshot);
         s.etag = entry.etag ?? null;
       }
       // Sem snapshot (primeira execução): mantém o seed padrão.
       s.initialized = true;
+      s.available = true; // estado remoto lido: gravações reativadas
       s.lastSync = Date.now();
     } catch (err) {
-      // Falha transitória na primeira leitura: tenta de novo na próxima chamada.
+      // Leitura falhou: o estado remoto é desconhecido, então as gravações
+      // ficam suspensas (evita sobrescrever dados remotos com uma cópia
+      // incompleta) e a próxima tentativa ocorre após o intervalo.
       console.error("[barbearia] Falha ao carregar dados do Netlify Blobs:", err);
+      s.available = false;
+      s.lastSync = Date.now();
     }
     return;
   }
 
-  if (!s.available) return;
   if (!force && Date.now() - s.lastSync < SYNC_TTL_MS) return;
 
   const store = await getDatabaseStore();
   if (!store) {
     s.available = false;
+    s.lastSync = Date.now();
+    warnDegraded();
     return;
   }
 
   try {
-    const entry = await store.getWithMetadata(
-      DATABASE_KEY,
-      s.etag
-        ? { type: "json", etag: s.etag, consistency: "strong" }
-        : { type: "json", consistency: "strong" }
+    const entry = await withTimeout(
+      store.getWithMetadata(
+        DATABASE_KEY,
+        s.etag
+          ? { type: "json", etag: s.etag, consistency: "strong" }
+          : { type: "json", consistency: "strong" }
+      )
     );
     if (!entry) {
       // O snapshot sumiu (ex.: store apagada): volta ao seed na próxima.
@@ -124,8 +195,11 @@ async function refreshLocked(force: boolean): Promise<void> {
     s.etag = entry.etag ?? s.etag;
     s.lastSync = Date.now();
   } catch (err) {
+    // Falha na leitura: suspende gravações até uma leitura bem-sucedida
+    // (mesma recuperação do bloco anterior) e evita retry em loop.
     console.error("[barbearia] Falha ao sincronizar com o Netlify Blobs:", err);
-    s.lastSync = Date.now(); // evita retry em loop dentro do mesmo request
+    s.available = false;
+    s.lastSync = Date.now();
   }
 }
 
@@ -135,18 +209,22 @@ async function refreshLocked(force: boolean): Promise<void> {
  */
 async function persistLocked(): Promise<boolean> {
   const s = state();
-  if (!s.available) return true; // modo degradado: sem backend para persistir
+  if (!s.available) {
+    warnDegraded();
+    return true; // modo degradado: sem backend para persistir
+  }
   const store = await getDatabaseStore();
   if (!store) {
     s.available = false;
+    warnDegraded();
     return true;
   }
 
   const snapshot = dumpSnapshot(getDb());
   try {
     const result = s.etag
-      ? await store.setJSON(DATABASE_KEY, snapshot, { onlyIfMatch: s.etag })
-      : await store.setJSON(DATABASE_KEY, snapshot, { onlyIfNew: true });
+      ? await withTimeout(store.setJSON(DATABASE_KEY, snapshot, { onlyIfMatch: s.etag }))
+      : await withTimeout(store.setJSON(DATABASE_KEY, snapshot, { onlyIfNew: true }));
     if (result.modified) {
       s.etag = result.etag ?? s.etag;
       s.lastSync = Date.now();
@@ -169,10 +247,11 @@ async function persistUnconditionalLocked(): Promise<void> {
   const store = await getDatabaseStore();
   if (!store) {
     s.available = false;
+    warnDegraded();
     return;
   }
   try {
-    const result = await store.setJSON(DATABASE_KEY, dumpSnapshot(getDb()));
+    const result = await withTimeout(store.setJSON(DATABASE_KEY, dumpSnapshot(getDb())));
     if (result.modified) {
       s.etag = result.etag ?? s.etag;
       s.lastSync = Date.now();

@@ -4,9 +4,13 @@
 //
 //   1. BARBEARIA_DB_PATH definido -> arquivo nesse caminho exato (dev ou
 //      volume montado explicitamente).
-//   2. Produção no Netlify (NETLIFY=true ou BARBEARIA_STORAGE=blobs)
-//      -> banco EM MEMÓRIA, sem tocar no sistema de arquivos. A persistência
-//      é feita pelo Netlify Blobs via src/lib/storage.
+//   2. Produção no Netlify -> banco EM MEMÓRIA, sem tocar no sistema de
+//      arquivos. A persistência é feita pelo Netlify Blobs via src/lib/storage.
+//      A detecção usa o CONTEXTO DO BLOBS injetado pela plataforma em runtime
+//      (`globalThis.netlifyBlobsContext` / `NETLIFY_BLOBS_CONTEXT`), pois a
+//      variável NETLIFY=true só existe no ambiente de BUILD do Netlify — ela
+//      NÃO é definida no runtime das functions. Nenhuma variável de ambiente
+//      é necessária para ativar a persistência em produção.
 //   3. Padrão (desenvolvimento local) -> arquivo fora do projeto (para não
 //      interferir no watch do Next.js), com fallback automático para o
 //      diretório temporário e, em último caso, memória.
@@ -27,13 +31,53 @@ type GlobalWithDb = typeof globalThis & {
 };
 
 /**
+ * Verdadeiro quando o contexto do Netlify Blobs está disponível neste
+ * processo. É o MESMO mecanismo que o próprio `@netlify/blobs` usa para
+ * descobrir `siteID`/`token` (ver `getEnvironmentContext` em
+ * `node_modules/@netlify/blobs/dist/chunk-*.js`): injetado pela plataforma
+ * em runtime (functions, edge, build plugins) sem exigir nenhuma configuração.
+ *
+ * A ordem de leitura espelha a da biblioteca: `globalThis.netlifyBlobsContext`
+ * tem precedência sobre `NETLIFY_BLOBS_CONTEXT`, que por sua vez pode estar
+ * em `globalThis.Netlify.env` (runtime moderno) ou em `process.env`.
+ */
+export function hasBlobsContext(): boolean {
+  try {
+    const g = globalThis as Record<string, unknown>;
+
+    // 1. Contexto já decodificado no global (injetado pelo runtime).
+    const inline = g.netlifyBlobsContext;
+    if (typeof inline === "string" && inline.length > 0) return true;
+    if (inline && typeof inline === "object") return true;
+
+    // 2. `Netlify.env` (runtime-utils `getEnvironment()`) e, por fim,
+    //    `process.env` — cobre build, functions e CLI.
+    const netlifyEnv = (
+      g.Netlify as { env?: { get?: (key: string) => string | undefined } } | undefined
+    )?.env;
+    if (netlifyEnv?.get?.("NETLIFY_BLOBS_CONTEXT")) return true;
+    if (process.env.NETLIFY_BLOBS_CONTEXT) return true;
+  } catch {
+    /* ambiente sem acesso a globalThis/process */
+  }
+  return false;
+}
+
+/**
  * Verdadeiro quando os dados devem ser persistidos no Netlify Blobs
  * (produção no Netlify). Nesse modo nenhum arquivo é criado em disco.
+ *
+ * Ordem de detecção (nenhuma variável obrigatória):
+ *   1. BARBEARIA_STORAGE=file|memory|blobs -> override explícito;
+ *   2. contexto do Blobs presente -> runtime do Netlify (functions);
+ *   3. NETLIFY=true -> apenas no build do Netlify (banco em memória para o
+ *      prerender, sem criar diretórios).
  */
 export function isCloudPersistence(): boolean {
   const mode = process.env.BARBEARIA_STORAGE;
   if (mode === "file" || mode === "memory") return false;
   if (mode === "blobs") return true;
+  if (hasBlobsContext()) return true;
   return process.env.NETLIFY === "true";
 }
 
@@ -58,10 +102,14 @@ function fileCandidates(): string[] {
 }
 
 function open(): DatabaseSync {
-  const candidates =
-    isCloudPersistence() && !process.env.BARBEARIA_DB_PATH
-      ? [":memory:"] // produção no Netlify: nunca cria diretórios em disco
-      : fileCandidates();
+  // Em produção no Netlify (ou com BARBEARIA_STORAGE=memory) nunca criamos
+  // diretórios: o sistema de arquivos das functions é efêmero/somente-leitura.
+  const memoryOnly =
+    process.env.BARBEARIA_STORAGE === "memory" ||
+    (isCloudPersistence() && !process.env.BARBEARIA_DB_PATH);
+  const candidates = memoryOnly
+    ? [":memory:"]
+    : fileCandidates();
 
   let lastError: unknown;
   for (const target of candidates) {

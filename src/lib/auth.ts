@@ -59,7 +59,17 @@ export async function getCurrentAdmin() {
   const store = await cookies();
   const token = store.get(COOKIE_NAME)?.value;
   if (!token) return null;
-  return getSessionProfile(hashToken(token));
+  const hashed = hashToken(token);
+
+  const profile = getSessionProfile(hashed);
+  if (profile) return profile;
+
+  // A sessão pode ter sido criada em outra instância há menos de 1s (janela
+  // de TTL da sincronização com o Blobs). Antes de desistir, força uma nova
+  // leitura do snapshot; se ainda assim não existir, o redirect continua.
+  invalidateStorage();
+  await ensureStorage();
+  return getSessionProfile(hashed);
 }
 
 export function hashPassword(password: string): string {
